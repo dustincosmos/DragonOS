@@ -20,7 +20,7 @@
 struct bt_root_t *bt_create_tree(struct bt_node_t *node, int (*cmp)(void *a, void *b), int (*release)(void *value))
 {
     if (node == NULL || cmp == NULL)
-        return (void*)-EINVAL;
+        return (void *)-EINVAL;
 
     struct bt_root_t *root = (struct bt_root_t *)kmalloc(sizeof(struct bt_root_t), 0);
     memset((void *)root, 0, sizeof(struct bt_root_t));
