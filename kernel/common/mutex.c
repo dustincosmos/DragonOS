@@ -17,7 +17,7 @@ void mutex_init(mutex_t *lock)
 static void __mutex_sleep()
 {
     current_pcb->state = PROC_UNINTERRUPTIBLE;
-    sched_cfs();
+    sched();
 }
 
 static void __mutex_acquire(mutex_t *lock)
@@ -37,14 +37,14 @@ void mutex_lock(mutex_t *lock)
         spin_lock(&lock->wait_lock);
         if (likely(mutex_is_locked(lock)))
         {
-            struct mutex_waiter_t *waiter = (struct mutex_waiter_t *)kmalloc(sizeof(struct mutex_waiter_t), 0);
+            struct mutex_waiter_t *waiter = (struct mutex_waiter_t *)kzalloc(sizeof(struct mutex_waiter_t), 0);
             if (waiter == NULL)
             {
                 kerror("In mutex_lock: no memory to alloc waiter. Program's behaviour might be indetermined!");
                 spin_unlock(&lock->wait_lock);
                 return;
             }
-            memset(waiter, 0, sizeof(struct mutex_waiter_t));
+            // memset(waiter, 0, sizeof(struct mutex_waiter_t));
             waiter->pcb = current_pcb;
             list_init(&waiter->list);
             list_append(&lock->wait_list, &waiter->list);

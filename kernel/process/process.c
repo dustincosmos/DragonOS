@@ -22,6 +22,8 @@
 
 #include <ktest/ktest.h>
 
+#include <mm/mmio.h>
+
 // #pragma GCC push_options
 // #pragma GCC optimize("O0")
 
@@ -32,7 +34,7 @@ extern void system_call(void);
 extern void kernel_thread_func(void);
 
 ul _stack_start; // initial proc的栈基地址（虚拟地址）
-struct mm_struct initial_mm = {0};
+extern struct mm_struct initial_mm;
 struct thread_struct initial_thread =
     {
         .rbp = (ul)(initial_proc_union.stack + STACK_SIZE / sizeof(ul)),
@@ -252,18 +254,45 @@ static int process_load_elf_file(struct pt_regs *regs, char *path)
         pos = phdr->p_offset;
 
         uint64_t virt_base = phdr->p_vaddr;
-        // kdebug("virt_base = %#018lx, &memory_management_struct=%#018lx", virt_base, &memory_management_struct);
 
         while (remain_mem_size > 0)
         {
+            // kdebug("loading...");
+            int64_t map_size = 0;
 
-            // todo: 改用slab分配4K大小内存块并映射到4K页
-            if (!mm_check_mapped((uint64_t)current_pcb->mm->pgd, virt_base)) // 未映射，则新增物理页
+            if (remain_mem_size > PAGE_2M_SIZE / 2)
             {
-                mm_map_proc_page_table((uint64_t)current_pcb->mm->pgd, true, virt_base, alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys, PAGE_2M_SIZE, PAGE_USER_PAGE, true, true, false);
 
+                uint64_t pa = alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys;
+                struct vm_area_struct *vma = NULL;
+                int ret = mm_create_vma(current_pcb->mm, virt_base, PAGE_2M_SIZE, VM_USER | VM_ACCESS_FLAGS, NULL, &vma);
+                // 防止内存泄露
+                if (ret == -EEXIST)
+                    free_pages(Phy_to_2M_Page(pa), 1);
+                else
+                    mm_map_vma(vma, pa);
                 memset((void *)virt_base, 0, PAGE_2M_SIZE);
+                map_size = PAGE_2M_SIZE;
             }
+            else
+            {
+                // todo: 使用4K、8K、32K大小内存块混合进行分配，提高空间利用率（减少了bmp的大小）
+                map_size = ALIGN(remain_mem_size, PAGE_4K_SIZE);
+                // 循环分配4K大小内存块
+                for (uint64_t off = 0; off < map_size; off += PAGE_4K_SIZE)
+                {
+                    uint64_t paddr = virt_2_phys((uint64_t)kmalloc(PAGE_4K_SIZE, 0));
+
+                    struct vm_area_struct *vma = NULL;
+                    int val = mm_create_vma(current_pcb->mm, virt_base + off, PAGE_4K_SIZE, VM_USER | VM_ACCESS_FLAGS, NULL, &vma);
+                    if (val == -EEXIST)
+                        kfree(phys_2_virt(paddr));
+                    else
+                        mm_map_vma(vma, paddr);
+                    memset((void *)(virt_base + off), 0, PAGE_4K_SIZE);
+                }
+            }
+
             pos = filp->file_ops->lseek(filp, pos, SEEK_SET);
             int64_t val = 0;
             if (remain_file_size != 0)
@@ -275,9 +304,9 @@ static int process_load_elf_file(struct pt_regs *regs, char *path)
             if (val < 0)
                 goto load_elf_failed;
 
-            remain_mem_size -= PAGE_2M_SIZE;
+            remain_mem_size -= map_size;
             remain_file_size -= val;
-            virt_base += PAGE_2M_SIZE;
+            virt_base += map_size;
         }
     }
 
@@ -285,9 +314,15 @@ static int process_load_elf_file(struct pt_regs *regs, char *path)
     regs->rsp = current_pcb->mm->stack_start;
     regs->rbp = current_pcb->mm->stack_start;
 
-    uint64_t pa = alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys;
-
-    mm_map_proc_page_table((uint64_t)current_pcb->mm->pgd, true, current_pcb->mm->stack_start - PAGE_2M_SIZE, pa, PAGE_2M_SIZE, PAGE_USER_PAGE, true, true, false);
+    {
+        struct vm_area_struct *vma = NULL;
+        uint64_t pa = alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys;
+        int val = mm_create_vma(current_pcb->mm, current_pcb->mm->stack_start - PAGE_2M_SIZE, PAGE_2M_SIZE, VM_USER | VM_ACCESS_FLAGS, NULL, &vma);
+        if (val == -EEXIST)
+            free_pages(Phy_to_2M_Page(pa), 1);
+        else
+            mm_map_vma(vma, pa);
+    }
 
     // 清空栈空间
     memset((void *)(current_pcb->mm->stack_start - PAGE_2M_SIZE), 0, PAGE_2M_SIZE);
@@ -425,7 +460,6 @@ exec_failed:;
 ul initial_kernel_thread(ul arg)
 {
     // kinfo("initial proc running...\targ:%#018lx", arg);
-
     fat32_init();
     usb_init();
 
@@ -512,7 +546,7 @@ ul process_do_exit(ul code)
     sti();
 
     process_exit_notify();
-    sched_cfs();
+    sched();
 
     while (1)
         pause();
@@ -583,6 +617,7 @@ void process_init()
     initial_mm.brk_end = current_pcb->addr_limit;
 
     initial_mm.stack_start = _stack_start;
+    initial_mm.vmas = NULL;
 
     initial_tss[proc_current_cpu_id].rsp0 = initial_thread.rbp;
 
@@ -766,7 +801,7 @@ struct process_control_block *process_get_pcb(long pid)
 void process_wakeup(struct process_control_block *pcb)
 {
     pcb->state = PROC_RUNNING;
-    sched_cfs_enqueue(pcb);
+    sched_enqueue(pcb);
 }
 
 /**
@@ -777,7 +812,7 @@ void process_wakeup(struct process_control_block *pcb)
 void process_wakeup_immediately(struct process_control_block *pcb)
 {
     pcb->state = PROC_RUNNING;
-    sched_cfs_enqueue(pcb);
+    sched_enqueue(pcb);
     // 将当前进程标志为需要调度，缩短新进程被wakeup的时间
     current_pcb->flags |= PF_NEED_SCHED;
 }
@@ -869,7 +904,7 @@ uint64_t process_copy_mm(uint64_t clone_flags, struct process_control_block *pcb
     memset(new_mms, 0, sizeof(struct mm_struct));
 
     memcpy(new_mms, current_pcb->mm, sizeof(struct mm_struct));
-
+    new_mms->vmas = NULL;
     pcb->mm = new_mms;
 
     // 分配顶层页表, 并设置顶层页表的物理地址
@@ -883,55 +918,54 @@ uint64_t process_copy_mm(uint64_t clone_flags, struct process_control_block *pcb
     uint64_t *current_pgd = (uint64_t *)phys_2_virt(current_pcb->mm->pgd);
 
     uint64_t *new_pml4t = (uint64_t *)phys_2_virt(new_mms->pgd);
-    // 迭代地拷贝用户空间
-    for (int i = 0; i <= 255; ++i)
+
+    // 拷贝用户空间的vma
+    struct vm_area_struct *vma = current_pcb->mm->vmas;
+    while (vma != NULL)
     {
-        // 当前页表项为空
-        if ((*(uint64_t *)(current_pgd + i)) == 0)
-            continue;
-
-        // 分配新的二级页表
-        uint64_t *new_pdpt = (uint64_t *)kmalloc(PAGE_4K_SIZE, 0);
-        memset(new_pdpt, 0, PAGE_4K_SIZE);
-
-        // 在新的一级页表中设置新的二级页表表项
-        set_pml4t(new_pml4t + i, mk_pml4t(virt_2_phys(new_pdpt), (*(current_pgd + i)) & 0xfffUL));
-
-        uint64_t *current_pdpt = (uint64_t *)phys_2_virt((*(uint64_t *)(current_pgd + i)) & (~0xfffUL));
-        // kdebug("current_pdpt=%#018lx, current_pid=%d", current_pdpt, current_pcb->pid);
-        for (int j = 0; j < 512; ++j)
+        if (vma->vm_end > USER_MAX_LINEAR_ADDR || vma->vm_flags & VM_DONTCOPY)
         {
-            if (*(current_pdpt + j) == 0)
-                continue;
+            vma = vma->vm_next;
+            continue;
+        }
 
-            // 分配新的三级页表
-            uint64_t *new_pdt = (uint64_t *)kmalloc(PAGE_4K_SIZE, 0);
-            memset(new_pdt, 0, PAGE_4K_SIZE);
-            // 在二级页表中填写新的三级页表
-            // 在新的二级页表中设置三级页表的表项
-            set_pdpt((uint64_t *)(new_pdpt + j), mk_pdpt(virt_2_phys(new_pdt), (*(current_pdpt + j)) & 0xfffUL));
-
-            uint64_t *current_pdt = (uint64_t *)phys_2_virt((*(current_pdpt + j)) & (~0xfffUL));
-            // kdebug("current_pdt=%#018lx", current_pdt);
-
-            // 循环拷贝三级页表
-            for (int k = 0; k < 512; ++k)
+        int64_t vma_size = vma->vm_end - vma->vm_start;
+        // kdebug("vma_size=%ld, vm_start=%#018lx", vma_size, vma->vm_start);
+        if (vma_size > PAGE_2M_SIZE / 2)
+        {
+            int page_to_alloc = (PAGE_2M_ALIGN(vma_size)) >> PAGE_2M_SHIFT;
+            for (int i = 0; i < page_to_alloc; ++i)
             {
-
-                if (*(current_pdt + k) == 0)
-                    continue;
-
-                // 获取新的物理页
                 uint64_t pa = alloc_pages(ZONE_NORMAL, 1, PAGE_PGT_MAPPED)->addr_phys;
 
-                memset((void *)phys_2_virt(pa), 0, PAGE_2M_SIZE);
+                struct vm_area_struct *new_vma = NULL;
+                int ret = mm_create_vma(new_mms, vma->vm_start + i * PAGE_2M_SIZE, PAGE_2M_SIZE, vma->vm_flags, vma->vm_ops, &new_vma);
+                // 防止内存泄露
+                if (unlikely(ret == -EEXIST))
+                    free_pages(Phy_to_2M_Page(pa), 1);
+                else
+                    mm_map_vma(new_vma, pa);
 
-                set_pdt((uint64_t *)(new_pdt + k), mk_pdt(pa, *(current_pdt + k) & 0x1ffUL));
-
-                // 拷贝数据
-                memcpy(phys_2_virt(pa), phys_2_virt((*(current_pdt + k)) & (~0x1ffUL)), PAGE_2M_SIZE);
+                memcpy((void *)phys_2_virt(pa), (void *)(vma->vm_start + i * PAGE_2M_SIZE), (vma_size >= PAGE_2M_SIZE) ? PAGE_2M_SIZE : vma_size);
+                vma_size -= PAGE_2M_SIZE;
             }
         }
+        else
+        {
+            uint64_t map_size = PAGE_4K_ALIGN(vma_size);
+            uint64_t va = (uint64_t)kmalloc(map_size, 0);
+
+            struct vm_area_struct *new_vma = NULL;
+            int ret = mm_create_vma(new_mms, vma->vm_start, map_size, vma->vm_flags, vma->vm_ops, &new_vma);
+            // 防止内存泄露
+            if (unlikely(ret == -EEXIST))
+                kfree((void *)va);
+            else
+                mm_map_vma(new_vma, virt_2_phys(va));
+
+            memcpy((void *)va, (void *)vma->vm_start, vma_size);
+        }
+        vma = vma->vm_next;
     }
 
     return retval;
@@ -957,64 +991,43 @@ uint64_t process_exit_mm(struct process_control_block *pcb)
         kdebug("pcb->mm->pgd==NULL");
         return 0;
     }
-    // 获取顶层页表
+
+    // // 获取顶层页表
     pml4t_t *current_pgd = (pml4t_t *)phys_2_virt(pcb->mm->pgd);
 
-    // 迭代地释放用户空间
-    for (int i = 0; i <= 255; ++i)
+    // 循环释放VMA中的内存
+    struct vm_area_struct *vma = pcb->mm->vmas;
+    while (vma != NULL)
     {
-        // 当前页表项为空
-        if ((current_pgd + i)->pml4t == 0)
-            continue;
 
-        // 二级页表entry
-        pdpt_t *current_pdpt = (pdpt_t *)phys_2_virt((current_pgd + i)->pml4t & (~0xfffUL));
-        // 遍历二级页表
-        for (int j = 0; j < 512; ++j)
+        struct vm_area_struct *cur_vma = vma;
+        vma = cur_vma->vm_next;
+
+        uint64_t pa;
+        // kdebug("vm start=%#018lx, sem=%d", cur_vma->vm_start, cur_vma->anon_vma->sem.counter);
+        mm_unmap_vma(pcb->mm, cur_vma, &pa);
+
+        uint64_t size = (cur_vma->vm_end - cur_vma->vm_start);
+
+        // 释放内存
+        switch (size)
         {
-            if ((current_pdpt + j)->pdpt == 0)
-                continue;
-
-            // 三级页表的entry
-            pdt_t *current_pdt = (pdt_t *)phys_2_virt((current_pdpt + j)->pdpt & (~0xfffUL));
-
-            // 释放三级页表的内存页
-            for (int k = 0; k < 512; ++k)
-            {
-                if ((current_pdt + k)->pdt == 0)
-                    continue;
-                // 存在4级页表
-                if (unlikely(((current_pdt + k)->pdt & (1 << 7)) == 0))
-                {
-                    // 存在4K页
-                    uint64_t *pt_ptr = (uint64_t *)phys_2_virt((current_pdt + k)->pdt & (~0x1fffUL));
-                    uint64_t *pte_ptr = pt_ptr;
-
-                    // 循环处理4K页表, 直接清空
-                    // todo: 当支持使用slab分配4K内存作为进程的4K页之后，在这里需要释放这些4K对象
-                    for (int16_t g = 0; g < 512; ++g, ++pte_ptr)
-                        *pte_ptr = 0;
-
-                    // 4级页表已经空了，释放页表
-                    if (unlikely(mm_check_page_table(pt_ptr)) == 0)
-                        kfree(pt_ptr);
-                }
-                else
-                {
-                    // 释放内存页
-                    if (mm_is_2M_page((current_pdt + k)->pdt & (~0x1fffUL))) // 校验是否为内存中的物理页
-                        free_pages(Phy_to_2M_Page((current_pdt + k)->pdt & (~0x1fffUL)), 1);
-                }
-            }
-            // 释放三级页表
-            kfree(current_pdt);
+        case PAGE_4K_SIZE:
+            kfree(phys_2_virt(pa));
+            break;
+        default:
+            break;
         }
-        // 释放二级页表
-        kfree(current_pdpt);
+        vm_area_del(cur_vma);
+        vm_area_free(cur_vma);
     }
+
     // 释放顶层页表
     kfree(current_pgd);
-
+    if (unlikely(pcb->mm->vmas != NULL))
+    {
+        kwarn("pcb.mm.vmas!=NULL");
+    }
     // 释放内存空间分布结构体
     kfree(pcb->mm);
 
@@ -1129,4 +1142,23 @@ void process_exit_thread(struct process_control_block *pcb)
 {
 }
 
-// #pragma GCC pop_options
+/**
+ * @brief 申请可用的文件句柄
+ *
+ * @return int
+ */
+int process_fd_alloc(struct vfs_file_t *file)
+{
+    int fd_num = -1;
+    struct vfs_file_t **f = current_pcb->fds;
+
+    for (int i = 0; i < PROC_MAX_FD_NUM; ++i) {
+        /* 找到指针数组中的空位 */
+        if (f[i] == NULL) {
+            fd_num = i;
+            f[i] = file;
+            break;
+        }
+    }
+    return fd_num;
+}

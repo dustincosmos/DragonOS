@@ -1,14 +1,17 @@
+(_core_mm_api)=
+
 # 内存管理API
 
 ## SLAB内存池
 
 SLAB内存池提供小内存对象的分配功能。
 
-### `void *kmalloc(unsigned long size, unsigned long flags)`
+### `void *kmalloc(unsigned long size, gfp_t gfp)`
 
 &emsp;&emsp;获取小块的内存。
 
 #### 描述
+
 &emsp;&emsp;kmalloc用于获取那些小于2M内存页大小的内存对象。可分配的内存对象大小为32bytes~1MBytes. 且分配的内存块大小、起始地址按照2的n次幂进行对齐。（比如，申请的是80bytes的内存空间，那么获得的内存对象大小为128bytes且内存地址按照128bytes对齐）
 
 ##### 参数
@@ -17,18 +20,36 @@ SLAB内存池提供小内存对象的分配功能。
 
 &emsp;&emsp;内存对象的大小
 
-**flags**
+**gfp**
 
-&emsp;&emsp;标志位（暂时未实现，默认填0）
+&emsp;&emsp;标志位
+
+### `void *kzalloc(unsigned long size, gfp_t gfp)`
+
+#### 描述
+
+&emsp;&emsp;获取小块的内存，并将其清零。其余功能与kmalloc相同。
+
+
+##### 参数
+
+**size**
+
+&emsp;&emsp;内存对象的大小
+
+**gfp**
+
+&emsp;&emsp;标志位
 
 ### `unsigned long kfree(void *address)`
 
 &emsp;&emsp;释放从slab分配的内存。
 
 #### 描述
+
 &emsp;&emsp;该函数用于释放通过kmalloc申请的内存。如果`address`为NULL，则函数被调用后，无事发生。
 
-&emsp;&emsp;请不要通过这个函数释放那些不是从`kmalloc()`申请的内存，否则将会导致系统崩溃。
+&emsp;&emsp;请不要通过这个函数释放那些不是从`kmalloc()`或`kzalloc()`申请的内存，否则将会导致系统崩溃。
 
 ##### 参数
 
@@ -67,6 +88,7 @@ DragonOS支持对物理页的直接操作
 &emsp;&emsp;分配的页面要被设置成的属性
 
 可选值：
+
 - `PAGE_PGT_MAPPED` 页面在页表中已被映射
 - `PAGE_KERNEL_INIT` 内核初始化所占用的页
 - `PAGE_DEVICE` 设备MMIO映射的内存
@@ -82,7 +104,6 @@ DragonOS支持对物理页的直接操作
 ##### 失败
 
 &emsp;&emsp;当ZONE错误或内存不足时，返回`NULL`
-
 
 ### `void free_pages(struct Page *page, int number)`
 
@@ -131,7 +152,6 @@ DragonOS支持对物理页的直接操作
 &emsp;&emsp;使用4级页表，将地址区域映射为若干4K页
 
 ### `int mm_map_proc_page_table(ul proc_page_table_addr, bool is_phys, ul virt_addr_start, ul phys_addr_start, ul length, ul flags, bool user, bool flush, bool use4k)`
-
 
 #### 描述
 
@@ -204,7 +224,7 @@ DragonOS支持对物理页的直接操作
 
 &emsp;&emsp;要取消映射的地址空间的长度
 
-### `mm_unmap(virt_addr, length)`
+### `mm_unmap_addr(virt_addr, length)`
 
 #### 描述
 
@@ -219,3 +239,29 @@ DragonOS支持对物理页的直接操作
 **length**
 
 &emsp;&emsp;要取消映射的地址空间的长度
+
+## 内存信息获取
+
+### `struct mm_stat_t mm_stat()`
+
+#### 描述
+
+&emsp;&emsp;获取计算机目前的内存空间使用情况
+
+#### 参数
+
+无
+
+#### 返回值
+
+&emsp;&emsp;返回值是一个`mm_mstat_t`结构体，该结构体定义于`mm/mm.h`中。其中包含了以下信息（单位均为字节）：
+
+| 参数名        | 解释                      |
+| ---------- | ----------------------- |
+| total      | 计算机的总内存数量大小             |
+| used       | 已使用的内存大小                |
+| free       | 空闲物理页所占的内存大小            |
+| shared     | 共享的内存大小                 |
+| cache_used | 位于slab缓冲区中的已使用的内存大小     |
+| cache_free | 位于slab缓冲区中的空闲的内存大小      |
+| available  | 系统总空闲内存大小（包括kmalloc缓冲区） |

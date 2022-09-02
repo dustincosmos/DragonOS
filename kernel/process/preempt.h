@@ -1,6 +1,11 @@
 #pragma once
 
-#include <process/process.h>
+#if ARCH(X86_64)
+#include <arch/x86_64/current.h>
+#else
+#error Unsupported architecture!
+#endif
+#include "proc-types.h"
 
 /**
  * @brief 增加自旋锁计数变量

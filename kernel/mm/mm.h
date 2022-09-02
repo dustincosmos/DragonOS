@@ -1,6 +1,9 @@
 #pragma once
 
 #include <common/glib.h>
+#include <common/gfp.h>
+#include <mm/mm-types.h>
+#include <process/process.h>
 
 // 每个页表的项数
 // 64位下，每个页表4k，每条页表项8B，故一个页表有512条
@@ -10,6 +13,9 @@
 #define PAGE_OFFSET (0xffff800000000000UL)
 #define KERNEL_BASE_LINEAR_ADDR (0xffff800000000000UL)
 #define USER_MAX_LINEAR_ADDR 0x00007fffffffffffUL
+// MMIO虚拟地址空间：1TB
+#define MMIO_BASE (0xffffa10000000000UL)
+#define MMIO_TOP (0xffffa20000000000UL)
 
 #define PAGE_4K_SHIFT 12
 #define PAGE_2M_SHIFT 21
@@ -145,7 +151,7 @@
     do                              \
     {                               \
         ul tmp;                     \
-        io_mfence();\
+        io_mfence();                \
         __asm__ __volatile__(       \
             "movq %%cr3, %0\n\t"    \
             "movq %0, %%cr3\n\t"    \
@@ -153,78 +159,37 @@
                                     \
     } while (0);
 
-// Address Range Descriptor Structure 地址范围描述符
-struct ARDS
+/**
+ * @brief 系统内存信息结构体（单位：字节）
+ *
+ */
+struct mm_stat_t
 {
-    ul BaseAddr;           // 基地址
-    ul Length;             // 内存长度   以字节为单位
-    unsigned int type;     // 本段内存的类型
-                           // type=1 表示可以被操作系统使用
-                           // type=2 ARR - 内存使用中或被保留，操作系统不能使用
-                           // 其他 未定义，操作系统需要将其视为ARR
-} __attribute__((packed)); // 修饰该结构体不会生成对齐空间，改用紧凑格式
-
-struct memory_desc
-{
-
-    struct ARDS e820[32]; // 物理内存段结构数组
-    ul len_e820;          // 物理内存段长度
-
-    ul *bmp;      // 物理空间页映射位图
-    ul bmp_len;   //  bmp的长度
-    ul bits_size; // 物理地址空间页数量
-
-    struct Page *pages_struct;
-    ul count_pages;      // struct page结构体的总数
-    ul pages_struct_len; // pages_struct链表的长度
-
-    struct Zone *zones_struct;
-    ul count_zones;      // zone结构体的数量
-    ul zones_struct_len; // zones_struct列表的长度
-
-    ul kernel_code_start, kernel_code_end; // 内核程序代码段起始地址、结束地址
-    ul kernel_data_end, rodata_end;        // 内核程序数据段结束地址、 内核程序只读段结束地址
-    uint64_t start_brk;                    // 堆地址的起始位置
-
-    ul end_of_struct; // 内存页管理结构的结束地址
+    uint64_t total;      // 计算机的总内存数量大小
+    uint64_t used;       // 已使用的内存大小
+    uint64_t free;       // 空闲物理页所占的内存大小
+    uint64_t shared;     // 共享的内存大小
+    uint64_t cache_used; // 位于slab缓冲区中的已使用的内存大小
+    uint64_t cache_free; // 位于slab缓冲区中的空闲的内存大小
+    uint64_t available;  // 系统总空闲内存大小（包括kmalloc缓冲区）
 };
 
-struct Zone
+/**
+ * @brief 虚拟内存区域的操作方法的结构体
+ *
+ */
+struct vm_operations_t
 {
-    // 指向内存页的指针
-    struct Page *pages_group;
-    ul count_pages; // 本区域的struct page结构体总数
-
-    // 本内存区域的起始、结束的页对齐地址
-    ul zone_addr_start;
-    ul zone_addr_end;
-    ul zone_length; // 区域长度
-
-    // 本区域空间的属性
-    ul attr;
-
-    struct memory_desc *gmd_struct;
-
-    // 本区域正在使用中和空闲中的物理页面数量
-    ul count_pages_using;
-    ul count_pages_free;
-
-    // 物理页被引用次数
-    ul total_pages_link;
-};
-
-struct Page
-{
-    // 本页所属的内存域结构体
-    struct Zone *zone;
-    // 本页对应的物理地址
-    ul addr_phys;
-    // 页面属性
-    ul attr;
-    // 页面被引用的次数
-    ul ref_counts;
-    // 本页的创建时间
-    ul age;
+    /**
+     * @brief vm area 被打开时的回调函数
+     *
+     */
+    void (*open)(struct vm_area_struct *area);
+    /**
+     * @brief vm area将要被移除的时候，将会调用该回调函数
+     *
+     */
+    void (*close)(struct vm_area_struct *area);
 };
 
 extern struct memory_desc memory_management_struct;
@@ -243,8 +208,8 @@ extern char _end;
 // 每个区域的索引
 
 int ZONE_DMA_INDEX = 0;
-int ZONE_NORMAL_INDEX = 0;   // low 1GB RAM ,was mapped in pagetable
-int ZONE_UNMAPPED_INDEX = 0; // above 1GB RAM,unmapped in pagetable
+int ZONE_NORMAL_INDEX = 0;
+int ZONE_UNMAPPED_INDEX = 0;
 
 // 初始化内存管理单元
 void mm_init();
@@ -317,14 +282,6 @@ ul get_page_attr(struct Page *page);
  */
 ul set_page_attr(struct Page *page, ul flags);
 
-/**
- * @brief 内存页表结构体
- *
- */
-typedef struct
-{
-    unsigned long pml4t;
-} pml4t_t;
 #define mk_pml4t(addr, attr) ((unsigned long)(addr) | (unsigned long)(attr))
 /**
  * @brief 设置pml4页表的页表项
@@ -333,26 +290,108 @@ typedef struct
  */
 #define set_pml4t(pml4tptr, pml4tval) (*(pml4tptr) = (pml4tval))
 
-typedef struct
-{
-    unsigned long pdpt;
-} pdpt_t;
 #define mk_pdpt(addr, attr) ((unsigned long)(addr) | (unsigned long)(attr))
 #define set_pdpt(pdptptr, pdptval) (*(pdptptr) = (pdptval))
 
-typedef struct
-{
-    unsigned long pdt;
-} pdt_t;
 #define mk_pdt(addr, attr) ((unsigned long)(addr) | (unsigned long)(attr))
 #define set_pdt(pdtptr, pdtval) (*(pdtptr) = (pdtval))
 
-typedef struct
-{
-    unsigned long pt;
-} pt_t;
 #define mk_pt(addr, attr) ((unsigned long)(addr) | (unsigned long)(attr))
 #define set_pt(ptptr, ptval) (*(ptptr) = (ptval))
+
+/*
+ *  vm_area_struct中的vm_flags的可选值
+ * 对应的结构体请见mm-types.h
+ */
+#define VM_NONE 0
+#define VM_READ (1 << 0)
+#define VM_WRITE (1 << 1)
+#define VM_EXEC (1 << 2)
+#define VM_SHARED (1 << 3)
+#define VM_IO (1 << 4) // MMIO的内存区域
+#define VM_SOFTDIRTY (1 << 5)
+#define VM_MAYSHARE (1 << 6) // 该vma可被共享
+#define VM_USER (1 << 7)     // 该vma可被用户态访问
+#define VM_DONTCOPY (1 << 8) // 当fork的时候不拷贝该虚拟内存区域
+
+/* VMA basic access permission flags */
+#define VM_ACCESS_FLAGS (VM_READ | VM_WRITE | VM_EXEC)
+
+/**
+ * @brief 初始化虚拟内存区域结构体
+ *
+ * @param vma
+ * @param mm
+ */
+static inline void vma_init(struct vm_area_struct *vma, struct mm_struct *mm)
+{
+    memset(vma, 0, sizeof(struct vm_area_struct));
+    vma->vm_mm = mm;
+    vma->vm_prev = vma->vm_next = NULL;
+    vma->vm_ops = NULL;
+    list_init(&vma->anon_vma_list);
+}
+
+/**
+ * @brief 判断给定的vma是否为当前进程所属的vma
+ *
+ * @param vma 给定的vma结构体
+ * @return true
+ * @return false
+ */
+static inline bool vma_is_foreign(struct vm_area_struct *vma)
+{
+    if (current_pcb->mm == NULL)
+        return true;
+    if (current_pcb->mm != vma->vm_mm)
+        return true;
+    return false;
+}
+
+static inline bool vma_is_accessible(struct vm_area_struct *vma)
+{
+    return vma->vm_flags & VM_ACCESS_FLAGS;
+}
+
+/**
+ * @brief 获取一块新的vma结构体，并将其与指定的mm进行绑定
+ *
+ * @param mm 与VMA绑定的内存空间分布结构体
+ * @return struct vm_area_struct* 新的VMA
+ */
+struct vm_area_struct *vm_area_alloc(struct mm_struct *mm);
+
+/**
+ * @brief 释放vma结构体
+ *
+ * @param vma 待释放的vma结构体
+ */
+void vm_area_free(struct vm_area_struct *vma);
+
+/**
+ * @brief 从链表中删除指定的vma结构体
+ *
+ * @param vma
+ */
+void vm_area_del(struct vm_area_struct *vma);
+
+/**
+ * @brief 查找第一个符合“addr < vm_end”条件的vma
+ *
+ * @param mm 内存空间分布结构体
+ * @param addr 虚拟地址
+ * @return struct vm_area_struct* 符合条件的vma
+ */
+struct vm_area_struct *vma_find(struct mm_struct *mm, uint64_t addr);
+
+/**
+ * @brief 插入vma
+ *
+ * @param mm
+ * @param vma
+ * @return int
+ */
+int vma_insert(struct mm_struct *mm, struct vm_area_struct *vma);
 
 /**
  * @brief 重新初始化页表的函数
@@ -403,19 +442,63 @@ void mm_unmap_proc_table(ul proc_page_table_addr, bool is_phys, ul virt_addr_sta
  * @param virt_addr 虚拟地址
  * @param length 地址长度
  */
-#define mm_unmap(virt_addr, length) ({                                 \
+#define mm_unmap_addr(virt_addr, length) ({                            \
     mm_unmap_proc_table((uint64_t)get_CR3(), true, virt_addr, length); \
 })
 
 /**
- * @brief 检测指定地址是否已经被映射
+ * @brief 创建VMA
  *
- * @param page_table_phys_addr 页表的物理地址
- * @param virt_addr 要检测的地址
- * @return true 已经被映射
- * @return false
+ * @param mm 要绑定的内存空间分布结构体
+ * @param vaddr 起始虚拟地址
+ * @param length 长度（字节）
+ * @param vm_flags vma的标志
+ * @param vm_ops vma的操作接口
+ * @param res_vma 返回的vma指针
+ * @return int 错误码
  */
-bool mm_check_mapped(ul page_table_phys_addr, uint64_t virt_addr);
+int mm_create_vma(struct mm_struct *mm, uint64_t vaddr, uint64_t length, vm_flags_t vm_flags, struct vm_operations_t *vm_ops, struct vm_area_struct **res_vma);
+
+/**
+ * @brief 将指定的物理地址映射到指定的vma处
+ *
+ * @param vma 要进行映射的VMA结构体
+ * @param paddr 起始物理地址
+ * @return int 错误码
+ */
+int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr);
+
+/**
+ * @brief 在页表中映射物理地址到指定的虚拟地址（需要页表中已存在对应的vma）
+ *
+ * @param mm 内存管理结构体
+ * @param vaddr 虚拟地址
+ * @param length 长度（字节）
+ * @param paddr 物理地址
+ * @return int 返回码
+ */
+int mm_map(struct mm_struct *mm, uint64_t vaddr, uint64_t length, uint64_t paddr);
+
+/**
+ * @brief 在页表中取消指定的vma的映射
+ *
+ * @param mm 指定的mm
+ * @param vma 待取消映射的vma
+ * @param paddr 返回的被取消映射的起始物理地址
+ * @return int 返回码
+ */
+int mm_unmap_vma(struct mm_struct *mm, struct vm_area_struct *vma, uint64_t *paddr);
+
+/**
+ * @brief 解除一段虚拟地址的映射（这些地址必须在vma中存在）
+ *
+ * @param mm 内存空间结构体
+ * @param vaddr 起始地址
+ * @param length 结束地址
+ * @param destroy 是否释放vma结构体
+ * @return int 错误码
+ */
+int mm_unmap(struct mm_struct *mm, uint64_t vaddr, uint64_t length, bool destroy);
 
 /**
  * @brief 检测是否为有效的2M页(物理内存页)
@@ -444,3 +527,20 @@ int8_t mm_check_page_table(uint64_t *ptr);
  * @return uint64_t
  */
 uint64_t mm_do_brk(uint64_t old_brk_end_addr, int64_t offset);
+
+/**
+ * @brief 获取系统当前的内存信息(未上锁，不一定精准)
+ *
+ * @return struct mm_stat_t 内存信息结构体
+ */
+struct mm_stat_t mm_stat();
+
+/**
+ * @brief 检测指定地址是否已经被映射
+ *
+ * @param page_table_phys_addr 页表的物理地址
+ * @param virt_addr 要检测的地址
+ * @return true 已经被映射
+ * @return false
+ */
+bool mm_check_mapped(ul page_table_phys_addr, uint64_t virt_addr);
