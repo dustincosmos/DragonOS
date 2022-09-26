@@ -20,10 +20,13 @@
 #include <sched/sched.h>
 
 #include <filesystem/fat32/fat32.h>
+#include <filesystem/VFS/VFS.h>
+#include <filesystem/devfs/devfs.h>
 
 #include "driver/multiboot2/multiboot2.h"
 #include "driver/acpi/acpi.h"
 #include "driver/keyboard/ps2_keyboard.h"
+#include "driver/tty/tty.h"
 #include "driver/mouse/ps2_mouse.h"
 #include "driver/disk/ata.h"
 #include "driver/pci/pci.h"
@@ -139,13 +142,15 @@ void system_initialize()
     smp_init();
     io_mfence();
 
+    vfs_init();
+    devfs_init();
     cpu_init();
     ps2_keyboard_init();
+    tty_init();
     // ps2_mouse_init();
     // ata_init();
     pci_init();
     io_mfence();
-    ahci_init();
 
     // test_slab();
     // test_mm();
@@ -208,5 +213,6 @@ void Start_Kernel(void)
 void ignore_int()
 {
     kwarn("Unknown interrupt or fault at RIP.\n");
+    sti();
 }
 #pragma GCC pop_options

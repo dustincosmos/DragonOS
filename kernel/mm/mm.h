@@ -45,8 +45,6 @@
 // 在这个地址以上的虚拟空间，用来进行特殊的映射
 #define SPECIAL_MEMOEY_MAPPING_VIRT_ADDR_BASE 0xffffa00000000000UL
 #define FRAME_BUFFER_MAPPING_OFFSET 0x3000000UL
-#define ACPI_RSDT_MAPPING_OFFSET 0x7000000UL
-#define ACPI_XSDT_MAPPING_OFFSET 0x9000000UL
 #define IO_APIC_MAPPING_OFFSET 0xfec00000UL
 #define LOCAL_APIC_MAPPING_OFFSET 0xfee00000UL
 #define AHCI_MAPPING_OFFSET 0xff200000UL // AHCI 映射偏移量,之后使用了4M的地址
@@ -464,9 +462,11 @@ int mm_create_vma(struct mm_struct *mm, uint64_t vaddr, uint64_t length, vm_flag
  *
  * @param vma 要进行映射的VMA结构体
  * @param paddr 起始物理地址
+ * @param offset 要映射的起始位置在vma中的偏移量
+ * @param length 要映射的长度
  * @return int 错误码
  */
-int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr);
+int mm_map_vma(struct vm_area_struct *vma, uint64_t paddr, uint64_t offset, uint64_t length);
 
 /**
  * @brief 在页表中映射物理地址到指定的虚拟地址（需要页表中已存在对应的vma）

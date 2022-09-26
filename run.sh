@@ -11,6 +11,13 @@ IA32_USE_QEMU=1
 bochsrc="./bochsrc"
 ARCH="x86_64"
 
+for i in "$@"
+do
+    if [ $i == "--no-qemu" ];then
+        IA32_USE_QEMU=0
+    fi
+done
+
 if [ ${IA32_USE_QEMU} == "1" ];then
     export EMULATOR=__QEMU_EMULATION__
 else
@@ -152,7 +159,7 @@ qemu_trace_usb=trace:usb_xhci_reset,trace:usb_xhci_run,trace:usb_xhci_stop,trace
 
 
 qemu_accel=kvm
-if [ "${OS}" == "Darwin" ]; then
+if [ $(uname) == Darwin ]; then
     qemu_accel=hvf
 fi
 
