@@ -490,10 +490,14 @@ ul initial_kernel_thread(ul arg)
 
     // 对一些组件进行单元测试
     uint64_t tpid[] = {
-        ktest_start(ktest_test_bitree, 0),
+        // ktest_start(ktest_test_bitree, 0),
         ktest_start(ktest_test_kfifo, 0),
         ktest_start(ktest_test_mutex, 0),
+<<<<<<< Updated upstream
         usb_pid,
+=======
+        ktest_start(ktest_test_rbtree,0),
+>>>>>>> Stashed changes
     };
     kinfo("Waiting test thread exit...");
     // 等待测试进程退出

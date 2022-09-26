@@ -23,7 +23,7 @@ struct rbt_root_t
 
 struct rbt_root_t *rbt_create_tree(struct rbt_node_t *node, int (*cmp)(void *a, void *b), int (*release)(void *value));
 
-struct rbt_node_t *rbt_create_node(struct rbt_node_t *left, struct rbt_node_t *right, struct rbt_node_t *parent,enum rbt_Colortype color ,void *value);
+struct rbt_node_t *rbt_create_node(void *value);
 
 int rbt_insert(struct rbt_root_t *root,void* value);
 
